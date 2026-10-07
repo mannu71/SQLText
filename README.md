@@ -177,13 +177,42 @@ and the Needle rules were tuned on these questions, so run it against your own s
 
 ## Safety
 
-Read-only is the default. Only a single `SELECT`/`WITH`/`UNION` statement is accepted, including RLM probes.
-Anything that writes (including `SELECT ... INTO` and data-modifying CTEs) is rejected before it reaches the
-database. Every transaction is rolled back, and on PostgreSQL it is also opened `READ ONLY`.
-Use `--allow-writes` to turn this off. For real safety, also connect with a database user that only has
-read permissions.
+Read-only is the default, and it is enforced in layers:
 
-The web UI binds to `127.0.0.1` and rejects requests from other websites.
+1. **The SQL check.** Only a single `SELECT`/`WITH`/`UNION` statement is accepted, including the RLM's probes.
+   Writes, `SELECT ... INTO`, data-modifying CTEs and `FOR UPDATE` are rejected. So are functions that are
+   callable from a SELECT but sleep, lock, read server files or run commands (`pg_sleep`, `pg_read_file`,
+   `dblink*`, `lo_*`, `set_config`, `nextval`, `SLEEP`, `BENCHMARK`, `LOAD_FILE`, `GET_LOCK`, `load_extension`,
+   `OPENROWSET`, `xp_*`, ...), and MySQL `/*! ... */` comments, whose contents MySQL executes.
+2. **The database refuses writes too.** PostgreSQL and MySQL/MariaDB run every query in a `READ ONLY` transaction.
+   SQLite files are opened with `mode=ro` and an authorizer that refuses `ATTACH` and writes. Every transaction
+   is rolled back.
+3. **Server-side time limit** (`--timeout`, default 30 s). This sets `statement_timeout` and `lock_timeout` on
+   PostgreSQL, `max_execution_time` on MySQL, `max_statement_time` on MariaDB, a progress-handler deadline on
+   SQLite, and the driver timeout on SQL Server (pymssql). Result rows are capped by `--max-rows`.
+4. **Least privilege.** This is the layer that matters most, and you set it up. sqltext warns when it is connected
+   as a PostgreSQL superuser or a MySQL admin user. Use a read-only user instead:
+
+```sql
+-- PostgreSQL
+CREATE ROLE sqltext_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE mydb TO sqltext_ro;
+GRANT USAGE ON SCHEMA public TO sqltext_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO sqltext_ro;
+ALTER ROLE sqltext_ro SET default_transaction_read_only = on;
+
+-- MySQL / MariaDB
+CREATE USER 'sqltext_ro'@'%' IDENTIFIED BY '...';
+GRANT SELECT ON mydb.* TO 'sqltext_ro'@'%';
+
+-- SQL Server (no read-only transactions: permissions are the only database-side guard)
+CREATE LOGIN sqltext_ro WITH PASSWORD = '...';
+CREATE USER sqltext_ro FOR LOGIN sqltext_ro;
+ALTER ROLE db_datareader ADD MEMBER sqltext_ro;
+```
+
+Use `--allow-writes` to switch off layers 1 and 2. The web UI binds to `127.0.0.1` and rejects requests from
+other websites.
 
 ## Tests
 

@@ -1,9 +1,11 @@
 """Database access: connect via any SQLAlchemy URL, introspect the schema, run queries."""
 from __future__ import annotations
 
+import sqlite3
+import time
 from dataclasses import dataclass, field
 
-from sqlalchemy import create_engine, inspect, select, table, column
+from sqlalchemy import column, create_engine, event, inspect, select, table
 from sqlalchemy.engine import make_url
 
 # SQLAlchemy dialect name -> sqlglot dialect name
@@ -77,14 +79,56 @@ class Schema:
         return next((t for t in self.tables if t.name == name), None)
 
 
+# SQLite actions refused in read-only mode (the file is also opened with mode=ro).
+_SQLITE_DENY = {
+    getattr(sqlite3, name) for name in dir(sqlite3)
+    if name in ("SQLITE_ATTACH", "SQLITE_DETACH", "SQLITE_INSERT", "SQLITE_UPDATE", "SQLITE_DELETE",
+                "SQLITE_ALTER_TABLE", "SQLITE_REINDEX", "SQLITE_ANALYZE")
+    or name.startswith(("SQLITE_CREATE_", "SQLITE_DROP_"))
+}
+
+
+def _sqlite_authorizer(action, *args):
+    return sqlite3.SQLITE_DENY if action in _SQLITE_DENY else sqlite3.SQLITE_OK
+
+
 class Database:
-    def __init__(self, url: str, read_only: bool = True):
+    def __init__(self, url: str, read_only: bool = True, timeout: float = 30.0):
+        """timeout: seconds a single query may run on the server before it is cancelled."""
         self.url = url
         self.read_only = read_only
-        self.engine = create_engine(url, pool_pre_ping=True)
+        self.timeout = timeout
+        u = make_url(url)
+        connect_args = {}
+        if u.get_backend_name() == "sqlite" and read_only and u.database not in (None, "", ":memory:") \
+                and not u.database.startswith("file:"):
+            # Let SQLite itself refuse writes to the file.
+            u = u.set(database=f"file:{u.database}", query={**u.query, "mode": "ro", "uri": "true"})
+        if u.get_driver_name() == "pymssql":
+            connect_args = {"timeout": int(timeout), "login_timeout": 15}
+        self.engine = create_engine(u, pool_pre_ping=True, connect_args=connect_args)
+        if u.get_backend_name() == "sqlite" and read_only:
+            event.listen(self.engine, "connect", lambda conn, _rec: conn.set_authorizer(_sqlite_authorizer))
         backend = self.engine.dialect.name
         self.dialect = SQLGLOT_DIALECTS.get(backend, backend)
         self._schema = None
+
+    def privilege_warnings(self) -> list:
+        """Warn when the connection can do far more than read: the SQL checks are a second line of
+        defence, the database user's permissions are the first."""
+        name = self.engine.dialect.name
+        try:
+            with self.engine.connect() as conn:
+                if name == "postgresql":
+                    if conn.exec_driver_sql("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").scalar():
+                        return ["connected as a PostgreSQL superuser; use a read-only role instead"]
+                elif name in ("mysql", "mariadb"):
+                    grants = " ".join(r[0] for r in conn.exec_driver_sql("SHOW GRANTS"))
+                    if "ALL PRIVILEGES ON *.*" in grants or " SUPER" in grants:
+                        return ["connected as a MySQL/MariaDB admin user; use a SELECT-only user instead"]
+        except Exception:
+            pass
+        return []
 
     @property
     def safe_url(self) -> str:
@@ -150,17 +194,44 @@ class Database:
     def run(self, sql: str, max_rows: int = 200):
         """Execute SQL and return (column_names, rows). Read-only mode always rolls back."""
         with self.engine.connect() as conn:
-            if self.read_only and self.engine.dialect.name == "postgresql":
-                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
-            # no_parameters: send the SQL verbatim so '%' and ':' in literals are not treated as binds
-            result = conn.execution_options(no_parameters=True).exec_driver_sql(sql)
-            if result.returns_rows:
-                columns = list(result.keys())
-                rows = [list(r) for r in result.fetchmany(max_rows)]
-            else:
-                columns, rows = [], []
+            sqlite_conn = self._limit(conn)
+            try:
+                # no_parameters: send the SQL verbatim so '%' and ':' in literals are not treated as binds
+                result = conn.execution_options(no_parameters=True).exec_driver_sql(sql)
+                if result.returns_rows:
+                    columns = list(result.keys())
+                    rows = [list(r) for r in result.fetchmany(max_rows)]
+                else:
+                    columns, rows = [], []
+            finally:
+                if sqlite_conn is not None:
+                    sqlite_conn.set_progress_handler(None, 0)  # pooled connection: clear the deadline
             if self.read_only:
                 conn.rollback()
             else:
                 conn.commit()
         return columns, rows
+
+    def _limit(self, conn):
+        """Server-side time limit and read-only transaction for the next statement.
+        Returns the raw sqlite3 connection when a deadline handler was installed."""
+        name = self.engine.dialect.name
+        ms = int(self.timeout * 1000)
+        if name == "postgresql":
+            if self.read_only:
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            conn.exec_driver_sql(f"SET LOCAL statement_timeout = {ms}")
+            conn.exec_driver_sql("SET LOCAL lock_timeout = 5000")
+        elif name in ("mysql", "mariadb"):
+            if getattr(self.engine.dialect, "is_mariadb", False):
+                conn.exec_driver_sql(f"SET SESSION max_statement_time = {self.timeout:g}")
+            else:
+                conn.exec_driver_sql(f"SET SESSION max_execution_time = {ms}")
+            if self.read_only:
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        elif name == "sqlite":
+            raw = conn.connection.driver_connection
+            deadline = time.monotonic() + self.timeout
+            raw.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+            return raw
+        return None

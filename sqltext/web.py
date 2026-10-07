@@ -34,7 +34,7 @@ class App:
         return self._engine
 
     def connect(self, url: str, allow_writes: bool = False) -> dict:
-        db = Database(url, read_only=not allow_writes)
+        db = Database(url, read_only=not allow_writes, timeout=self.args.timeout)
         db.schema()  # fail fast on bad credentials
         self.db = db
         if self._engine is not None:
@@ -49,6 +49,7 @@ class App:
             "url": self.db.safe_url,
             "dialect": self.db.dialect,
             "read_only": self.db.read_only,
+            "warnings": self.db.privilege_warnings(),
             "backend": self.args.backend + (" + bedrock" if self.args.backend == "router" and self.args.bedrock else ""),
             "tables": [
                 {"name": t.name, "columns": [c.name for c in t.columns]} for t in self.db.schema().tables

@@ -87,6 +87,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<":
 function showStatus(s) {
   if (!s.connected) { $("status").textContent = "Not connected · backend: " + s.backend; return; }
   $("status").textContent = `${s.url} · ${s.dialect} · ${s.read_only ? "read-only" : "writes allowed"} · ${s.backend}`;
+  $("connErr").textContent = (s.warnings || []).map(w => "Warning: " + w).join("\n");
   $("tables").innerHTML = s.tables.map(t =>
     `<details><summary>${esc(t.name)}</summary><ul>${t.columns.map(c => `<li>${esc(c)}</li>`).join("")}</ul></details>`).join("");
 }

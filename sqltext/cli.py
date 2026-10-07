@@ -39,6 +39,8 @@ def _add_common(p: argparse.ArgumentParser, db_required: bool = True) -> None:
     p.add_argument("--threads", type=int, help="CPU threads for the local model (default: auto)")
     p.add_argument("--allow-writes", action="store_true", help="allow INSERT/UPDATE/DELETE (off by default)")
     p.add_argument("--max-rows", type=int, default=200)
+    p.add_argument("--timeout", type=float, default=float(env("SQLTEXT_TIMEOUT", "30")),
+                   help="seconds a query may run on the database server before it is cancelled (default 30)")
     g = p.add_argument_group("router / Bedrock")
     g.add_argument("--bedrock", action="store_true", default=env("SQLTEXT_BEDROCK") == "1",
                    help="let the router escalate to Claude on Amazon Bedrock (or set SQLTEXT_BEDROCK=1). "
@@ -147,7 +149,9 @@ def run(args) -> int:
         serve(args)
         return 0
 
-    db = Database(args.db, read_only=not args.allow_writes)
+    db = Database(args.db, read_only=not args.allow_writes, timeout=args.timeout)
+    for w in db.privilege_warnings():
+        print(f"Warning: {w}", file=sys.stderr)
     if args.command == "schema":
         print(render_ddl(db.schema().tables))
         return 0
