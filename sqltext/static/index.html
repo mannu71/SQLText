@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sqltext</title>
+<style>
+  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6e6e73; --card:#fff; --line:#dedee3; --accent:#2f6fde; --err:#c0392b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16171a; --fg:#e8e8ea; --muted:#9a9aa2; --card:#1f2024; --line:#33343a; --accent:#6b9cff; --err:#ff6b5e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; grid-template-columns: 240px 1fr; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  input, textarea, button { font:inherit; color:inherit; }
+  input[type=text], textarea { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+  textarea { font-family: ui-monospace, monospace; font-size:13px; min-height:80px; }
+  button { padding:8px 14px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .muted { color:var(--muted); font-size:13px; }
+  #status { overflow-wrap:anywhere; }
+  .err { color:var(--err); white-space:pre-wrap; }
+  #tables details { margin:4px 0; } #tables summary { cursor:pointer; }
+  #tables ul { margin:2px 0 6px; padding-left:18px; font-size:13px; color:var(--muted); }
+  .scroll { overflow:auto; max-height:60vh; }
+  table { border-collapse:collapse; font-size:13px; width:100%; }
+  th, td { border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; white-space:nowrap; }
+  th { position:sticky; top:0; background:var(--card); }
+</style>
+</head>
+<body>
+<main>
+  <aside>
+    <h1>sqltext</h1>
+    <div class="muted" id="status">Not connected</div>
+    <div class="card" style="margin-top:12px">
+      <label class="muted" for="url">Database URL</label>
+      <input type="text" id="url" placeholder="postgresql+psycopg://user:pass@localhost/db">
+      <div class="row">
+        <label class="muted"><input type="checkbox" id="writes"> allow writes</label>
+        <button id="connect">Connect</button>
+      </div>
+      <div class="err" id="connErr"></div>
+    </div>
+    <div id="tables" style="margin-top:12px"></div>
+  </aside>
+  <section>
+    <div class="card">
+      <input type="text" id="question" placeholder="Ask a question, e.g. how many orders were shipped last month?">
+      <div class="row">
+        <button id="ask">Ask</button>
+        <label class="muted"><input type="checkbox" id="sqlOnly"> SQL only (don't run)</label>
+        <span class="muted" id="busy"></span>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <label class="muted" for="sql">Generated SQL (editable)</label>
+      <textarea id="sql" spellcheck="false"></textarea>
+      <div class="row"><button id="run">Run SQL</button></div>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card scroll" style="margin-top:12px" id="result"><span class="muted">Results appear here.</span></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  return r.json();
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function showStatus(s) {
+  if (!s.connected) { $("status").textContent = "Not connected · backend: " + s.backend; return; }
+  $("status").textContent = `${s.url} · ${s.dialect} · ${s.read_only ? "read-only" : "writes allowed"} · ${s.backend}`;
+  $("tables").innerHTML = s.tables.map(t =>
+    `<details><summary>${esc(t.name)}</summary><ul>${t.columns.map(c => `<li>${esc(c)}</li>`).join("")}</ul></details>`).join("");
+}
+function showResult(a) {
+  if (a.sql !== undefined) $("sql").value = a.sql || "";
+  $("err").textContent = a.error || "";
+  if (!a.columns || !a.columns.length) { $("result").innerHTML = `<span class="muted">${a.error ? "No results." : "Query returned no rows."}</span>`; return; }
+  const head = a.columns.map(c => `<th>${esc(c)}</th>`).join("");
+  const body = a.rows.map(r => "<tr>" + r.map(v => `<td>${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("") + "</tr>").join("");
+  $("result").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table><div class="muted">${a.rows.length} row(s)</div>`;
+}
+async function busy(btn, label, fn) {
+  btn.disabled = true; $("busy").textContent = label;
+  try { await fn(); } finally { btn.disabled = false; $("busy").textContent = ""; }
+}
+$("connect").onclick = () => busy($("connect"), "Connecting…", async () => {
+  const s = await api("/api/connect", { url: $("url").value.trim(), allow_writes: $("writes").checked });
+  $("connErr").textContent = s.error || "";
+  if (!s.error) showStatus(s);
+});
+$("ask").onclick = () => busy($("ask"), "Thinking… (first question loads the model)", async () => {
+  const q = $("question").value.trim(); if (!q) return;
+  showResult(await api("/api/ask", { question: q, execute: !$("sqlOnly").checked }));
+});
+$("run").onclick = () => busy($("run"), "Running…", async () => showResult(await api("/api/run", { sql: $("sql").value })));
+$("question").addEventListener("keydown", e => { if (e.key === "Enter") $("ask").click(); });
+api("/api/status").then(showStatus);
+</script>
+</body>
+</html>

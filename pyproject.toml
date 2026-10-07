@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqltext"
+version = "0.1.0"
+description = "Local text-to-SQL for any database, built for low-end hardware"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "sqlalchemy>=2.0",
+    "sqlglot>=25",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+# Default SQL model runtime (prebuilt CPU wheels:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu)
+llama = ["llama-cpp-python>=0.3", "huggingface_hub>=0.20"]
+needle = ["cactus-needle>=3"]
+postgres = ["psycopg[binary]>=3.1"]
+mysql = ["pymysql>=1.1"]
+mssql = ["pymssql>=2.2"]
+all = ["sqltext[llama,needle,postgres,mysql,mssql]"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+sqltext = "sqltext.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sqltext*"]
+
+[tool.setuptools.package-data]
+sqltext = ["static/*"]
