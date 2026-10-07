@@ -43,7 +43,7 @@ class Router:
     def __init__(self, db, use_needle: bool = True, use_local: bool = True, local_model: str = "tiny",
                  threads: int = None, bedrock: bool = False, region: str = None, strong_model: str = None,
                  fast_model: str = None, effort: str = "medium", big_schema_tables: int = 40,
-                 max_depth: int = 2, client=None):
+                 max_depth: int = 1, client=None, max_cost: float = None):
         self.db = db
         self.use_needle = use_needle
         self.use_local = use_local
@@ -55,6 +55,8 @@ class Router:
         self.big_schema_tables = big_schema_tables
         self.max_depth = max_depth
         self._client = client
+        self.max_cost = max_cost
+        self._gate = None
         self._models = {}
         from .backends.bedrock import FAST_MODEL, STRONG_MODEL
         self.strong_model = strong_model or STRONG_MODEL
@@ -62,11 +64,15 @@ class Router:
 
     # --- models (loaded on first use) ------------------------------------------------------
     @property
-    def client(self):
-        if self._client is None:
-            from .backends.bedrock import make_client
-            self._client = make_client(self.region)
-        return self._client
+    def gate(self):
+        """All Bedrock calls share one gate: one budget, one circuit breaker, one cost meter."""
+        if self._gate is None:
+            from .backends.bedrock import BedrockGate, make_client
+            self._gate = BedrockGate(self._client or make_client(self.region), max_cost=self.max_cost)
+        return self._gate
+
+    def usage(self) -> str:
+        return self._gate.summary() if self._gate and self._gate.calls else ""
 
     def model(self, key: str):
         if key not in self._models:
@@ -77,7 +83,7 @@ class Router:
                 self._models[key] = get_backend("llama", self.local_model, **opts)
             elif key == "bedrock-fast":
                 from .backends.bedrock import BedrockBackend
-                self._models[key] = BedrockBackend(self.fast_model, effort=self.effort, client=self.client)
+                self._models[key] = BedrockBackend(self.fast_model, effort=self.effort, gate=self.gate)
             else:
                 raise KeyError(key)
         return self._models[key]
@@ -85,7 +91,7 @@ class Router:
     def rlm(self, depth: int):
         from .rlm import RecursiveBackend
         return RecursiveBackend(
-            self.db, self.client, self.strong_model, effort=self.effort,
+            self.db, self.gate, self.strong_model, effort=self.effort,
             sub_solver=lambda q, tables: self.ask(q, max_rows=20, tables=tables, depth=depth + 1),
         )
 
@@ -172,8 +178,8 @@ class Router:
             last = ans
             if ans.error:
                 trace.append(f"{ans.model}: failed ({ans.error[:120]})")
-                if "read-only mode" in ans.error:
-                    break  # a refused write is final, not a reason to ask a bigger model
+                if ans.refused:
+                    break  # a refused query is final, not a reason to send the question to a bigger model
                 continue
             issues = grounding_issues(ans.sql, question, schema) if step == "local" else []
             if issues and has_next:

@@ -95,10 +95,18 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_messages(schema: Schema, question: str, error: str = None, previous_sql: str = None) -> list:
+def build_messages(schema: Schema, question: str, error: str = None, previous_sql: str = None,
+                   cache_schema: bool = False) -> list:
+    """cache_schema: send the schema and the question as separate content blocks, with a prompt-cache
+    breakpoint after the schema (for APIs that support it; local models get one plain string)."""
     dialect = DIALECT_NAMES.get(schema.dialect, schema.dialect)
     ddl = render_ddl(link_tables(schema, question))
     user = f"Schema:\n{ddl}\n\nQuestion: {question}"
+    if cache_schema:
+        user = [
+            {"type": "text", "text": f"Schema:\n{ddl}", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": f"Question: {question}"},
+        ]
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT.format(dialect=dialect)},
         {"role": "user", "content": user},

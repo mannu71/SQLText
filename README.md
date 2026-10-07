@@ -102,6 +102,21 @@ variables, `~/.aws`, or an instance role), and the region from `--region` or `AW
 | Escalations, RLM sub-questions, query rewrites | `anthropic.claude-haiku-4-5` | `--fast-model` |
 | RLM root (plans, explores, writes hard SQL) | `anthropic.claude-opus-5-5` | `--strong-model`, `--effort` |
 
+Reliability and cost controls (all Bedrock calls go through one gate):
+
+- **Timeouts and retries.** Each request has a 120 s timeout and up to 3 retries, which the SDK spaces out
+  with exponential backoff on throttling (429), server errors and dropped connections.
+- **Circuit breaker.** After 3 outage-type failures in a row, Bedrock is skipped for 60 s. The router falls
+  back to whatever the local models produced and says so in the trace.
+- **Budget.** `--max-cost 0.50` (or `SQLTEXT_MAX_COST`) stops Bedrock calls once the session's *estimated*
+  spend reaches $0.50. Costs are estimated from token usage at Anthropic list prices. Bedrock sets its own
+  prices, so override them with `SQLTEXT_PRICES="anthropic.claude-haiku-4-5=1/5,..."` if yours differ. The
+  token and cost summary is printed after each `ask`.
+- **Prompt caching.** For escalations, the schema is sent as its own block with a cache breakpoint, so
+  repeated questions about the same database re-read it from cache. Bedrock only caches prefixes of at least
+  4,096 tokens on Haiku 4.5 and 512 on Opus 5.5; smaller schemas simply aren't cached. The RLM loop uses
+  automatic caching, so each turn re-reads the growing conversation from cache.
+
 Opus 5.5 runs safety classifiers that can occasionally decline a harmless request. Bedrock has no
 server-side fallback, so the SDK's refusal-fallback middleware retries such a decline on
 `anthropic.claude-opus-5`. If every model declines, the router reports an error.

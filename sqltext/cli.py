@@ -52,6 +52,8 @@ def _add_common(p: argparse.ArgumentParser, db_required: bool = True) -> None:
                    help="Bedrock model for escalations, sub-questions and rewrites (default: anthropic.claude-haiku-4-5)")
     g.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"],
                    help="reasoning effort for the strong model")
+    g.add_argument("--max-cost", type=float, default=float(env("SQLTEXT_MAX_COST")) if env("SQLTEXT_MAX_COST") else None,
+                   help="stop calling Bedrock once this many US dollars (estimated) have been spent this session")
     g.add_argument("--no-needle", action="store_true", help="router: skip the Needle tier")
     g.add_argument("--no-local", action="store_true", help="router: skip the local GGUF model")
 
@@ -62,13 +64,22 @@ def build(args, db):
         from .gateway import Router
         return Router(db, use_needle=not args.no_needle, use_local=not args.no_local, local_model=args.model or "tiny",
                       threads=args.threads, bedrock=args.bedrock, region=args.region,
-                      strong_model=args.strong_model, fast_model=args.fast_model, effort=args.effort)
+                      strong_model=args.strong_model, fast_model=args.fast_model, effort=args.effort,
+                      max_cost=args.max_cost)
     opts = {}
     if args.backend == "llama" and args.threads:
         opts["threads"] = args.threads
     if args.backend == "bedrock":
-        opts.update(region=args.region, effort=args.effort)
+        opts.update(region=args.region, effort=args.effort, max_cost=args.max_cost)
     return TextToSQL(db, get_backend(args.backend, args.model, **opts))
+
+
+def usage(engine) -> str:
+    """Bedrock token/cost summary for the session, if any Bedrock calls were made."""
+    if hasattr(engine, "usage"):
+        return engine.usage()
+    gate = getattr(getattr(engine, "backend", None), "gate", None)
+    return gate.summary() if gate and gate.calls else ""
 
 
 def print_answer(ans, show_rows: bool) -> int:
@@ -165,6 +176,8 @@ def run(args) -> int:
     if args.command == "ask":
         ans = engine.ask(args.question, execute=not args.sql_only, max_rows=args.max_rows)
         code = print_answer(ans, show_rows=not args.sql_only)
+        if usage(engine):
+            print(f"  {usage(engine)}", file=sys.stderr)
         if args.analyze and ans.sql and not ans.error:
             from .analyzer import analyze
             print_analysis(analyze(db, ans.sql))

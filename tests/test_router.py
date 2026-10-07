@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 from fakes import FakeChat, FakeClient, response, text, tool
-from sqltext.backends.bedrock import BedrockBackend, model_params
+from sqltext.backends.bedrock import BedrockBackend, BedrockGate, BudgetExceeded, CircuitOpen, model_params
 from sqltext.gateway import Router
 from sqltext.hardware import check_budget
 from sqltext.verify import grounding_issues
@@ -89,7 +91,8 @@ def test_bedrock_request_shape():
     b = BedrockBackend("anthropic.claude-opus-5-5", client=client, effort="high")
     assert b.chat([{"role": "system", "content": "sys"}, {"role": "user", "content": "q"}]) == "```sql\nSELECT 1\n```"
     call = client.calls[0]
-    assert call["system"] == "sys" and call["messages"] == [{"role": "user", "content": "q"}]
+    assert call["system"] == [{"type": "text", "text": "sys"}]
+    assert call["messages"] == [{"role": "user", "content": "q"}]
     assert call["output_config"] == {"effort": "high"} and "thinking" not in call
     assert model_params("anthropic.claude-haiku-4-5") == {}  # Haiku 4.5 rejects effort
 
@@ -155,3 +158,57 @@ def test_local_budget_rejects_big_models(tmp_path):
     with open(small, "wb") as f:
         f.truncate(400 * 1024**2)
     check_budget(str(small))
+
+
+# --- Bedrock gate: caching, budget, circuit breaker ---------------------------------------------
+def test_schema_block_is_cached_and_question_is_not(db):
+    client = FakeClient(response(text("SELECT COUNT(*) FROM customers")))
+    BedrockBackend(client=client).generate_sql(db.schema(), "how many customers")
+    blocks = client.calls[0]["messages"][0]["content"]
+    assert blocks[0]["text"].startswith("Schema:") and blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert blocks[1] == {"type": "text", "text": "Question: how many customers"}
+
+
+def test_rlm_uses_automatic_prompt_caching(db):
+    client = FakeClient(response(tool("submit_sql", "t1", sql="SELECT COUNT(*) FROM orders")))
+    r = router(db, client)
+    r.use_local = False
+    r.big_schema_tables = 2
+    r.ask("how many orders")
+    assert client.calls[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_cost_accounting_and_budget():
+    usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000,
+                            cache_read_input_tokens=0, cache_creation_input_tokens=0)
+    reply = response(text("SELECT 1"), model="anthropic.claude-haiku-4-5")
+    reply.usage = usage
+    gate = BedrockGate(FakeClient(reply, reply), max_cost=1.0)
+    gate.create(model="anthropic.claude-haiku-4-5", messages=[])
+    assert gate.cost == pytest.approx(1.0 + 0.5)  # $1/M in, $5/M out
+    with pytest.raises(BudgetExceeded):
+        gate.create(model="anthropic.claude-haiku-4-5", messages=[])
+    assert "1 calls" in gate.summary()
+
+
+def test_circuit_breaker_opens_after_repeated_outages():
+    import anthropic
+
+    def outage(_kwargs):
+        raise anthropic.APIConnectionError(request=None)
+
+    client = FakeClient(outage, outage, outage, response(text("SELECT 1")))
+    gate = BedrockGate(client, failure_threshold=3, cooldown_s=60)
+    for _ in range(3):
+        with pytest.raises(anthropic.APIConnectionError):
+            gate.create(model="m", messages=[])
+    with pytest.raises(CircuitOpen):
+        gate.create(model="m", messages=[])
+    assert len(client.calls) == 3  # the open circuit did not call Bedrock
+
+
+def test_budget_stop_is_reported_in_trace(db):
+    r = router(db, FakeClient(), local=FakeChat("SELECT COUNT(*) FROM orders WHERE status = 'shipped'"))
+    r.max_cost = 0.0
+    ans = r.ask("how many orders were placed since May 2024")
+    assert any("budget" in t for t in ans.trace)

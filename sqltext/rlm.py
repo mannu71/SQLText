@@ -86,11 +86,11 @@ TOOLS = [
 class RecursiveBackend(Backend):
     name = "rlm"
 
-    def __init__(self, db, client, model: str, sub_solver, effort: str = "medium",
+    def __init__(self, db, gate, model: str, sub_solver, effort: str = "medium",
                  max_steps: int = 16, probe_rows: int = 20):
         """sub_solver(question, tables) -> Answer answers a sub-question (the router, one level deeper)."""
         self.db = db
-        self.client = client
+        self.gate = gate  # BedrockGate: budget, circuit breaker, cost accounting
         self.model = model
         self.sub_solver = sub_solver
         self.effort = effort
@@ -153,8 +153,10 @@ class RecursiveBackend(Backend):
         messages = [{"role": "user", "content": prompt}]
         system = SYSTEM.format(dialect=DIALECT_NAMES.get(schema.dialect, schema.dialect))
         for _ in range(self.max_steps):
-            response = self.client.beta.messages.create(
+            response = self.gate.create(
                 model=self.model, max_tokens=16000, system=system, tools=TOOLS, messages=messages,
+                # automatic prompt caching: each turn re-reads the growing conversation from cache
+                cache_control={"type": "ephemeral"},
                 **model_params(self.model, self.effort),
             )
             if response.stop_reason == "refusal":

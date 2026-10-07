@@ -20,6 +20,7 @@ class Answer:
     route: str = ""                                # router tier, e.g. "medium"
     trace: list = field(default_factory=list)      # router steps, e.g. "local:tiny -> escalated: ..."
     warnings: list = field(default_factory=list)
+    refused: bool = False                          # the safety check refused the SQL
 
 
 class TextToSQL:
@@ -53,6 +54,7 @@ class TextToSQL:
             except UnsafeSQLError as e:
                 # Never "fix" a refused query by retrying: report it.
                 answer.error = str(e)
+                answer.refused = True
                 return answer
             except Exception as e:  # parse or database error: show it to the model and retry
                 error = (str(e).strip().splitlines() or [type(e).__name__])[0][:500]
