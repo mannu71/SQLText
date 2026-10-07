@@ -4,23 +4,21 @@ from __future__ import annotations
 import os
 import sys
 
-from ..hardware import MODELS, default_threads, pick_model_size
+from ..hardware import MODELS, check_budget, default_threads
 from . import ChatBackend
 
 
 def resolve_model_path(model: str) -> str:
-    """Accepts 'auto', a size name (tiny/small/medium), a local .gguf path, or 'hf-repo:file.gguf'."""
+    """Accepts a size name (tiny), a local .gguf path, or 'hf-repo:file.gguf'."""
     if os.path.isfile(model):
         return model
-    if model == "auto":
-        model = pick_model_size()
     if model in MODELS:
         repo, filename = MODELS[model]["repo"], MODELS[model]["file"]
     elif ":" in model:
         repo, filename = model.split(":", 1)
     else:
         raise ValueError(
-            f"model {model!r} is not a file, a size ({', '.join(MODELS)}, auto) or 'hf-repo:file.gguf'"
+            f"model {model!r} is not a file, a size ({', '.join(MODELS)}) or 'hf-repo:file.gguf'"
         )
     try:
         from huggingface_hub import hf_hub_download, try_to_load_from_cache
@@ -36,7 +34,7 @@ def resolve_model_path(model: str) -> str:
 class LlamaBackend(ChatBackend):
     name = "llama"
 
-    def __init__(self, model: str = "auto", n_ctx: int = 4096, threads: int = None):
+    def __init__(self, model: str = "tiny", n_ctx: int = 4096, threads: int = None):
         try:
             from llama_cpp import Llama
         except ImportError as e:
@@ -46,6 +44,7 @@ class LlamaBackend(ChatBackend):
                 "https://abetlen.github.io/llama-cpp-python/whl/cpu"
             ) from e
         self.model_path = resolve_model_path(model)
+        check_budget(self.model_path)
         self.llm = Llama(
             model_path=self.model_path,
             n_ctx=n_ctx,

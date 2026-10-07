@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .backends import Backend
+from .backends import Backend, ChatBackend
 from .db import Database
 from .safety import UnsafeSQLError, check_sql
 
@@ -16,6 +16,10 @@ class Answer:
     rows: list = field(default_factory=list)
     error: str = ""
     attempts: int = 0
+    model: str = ""                                # which model produced the SQL
+    route: str = ""                                # router tier, e.g. "medium"
+    trace: list = field(default_factory=list)      # router steps, e.g. "local:tiny -> escalated: ..."
+    warnings: list = field(default_factory=list)
 
 
 class TextToSQL:
@@ -24,9 +28,13 @@ class TextToSQL:
         self.backend = backend
         self.max_retries = max_retries
 
-    def ask(self, question: str, execute: bool = True, max_rows: int = 200) -> Answer:
-        schema = self.db.schema()
-        answer = Answer(question)
+    def rewriters(self) -> list:
+        """Models for the query analyzer's rewrite task (only chat models can rewrite SQL)."""
+        return [(self.backend.name, self.backend)] if isinstance(self.backend, ChatBackend) else []
+
+    def ask(self, question: str, execute: bool = True, max_rows: int = 200, schema=None) -> Answer:
+        schema = schema or self.db.schema()
+        answer = Answer(question, model=getattr(self.backend, "name", ""))
         error, sql = None, None
         for attempt in range(1, self.max_retries + 2):
             answer.attempts = attempt

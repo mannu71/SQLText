@@ -112,6 +112,16 @@ class Database:
             self._sample(t)
         return Schema(self.dialect, tables)
 
+    def indexes(self, table_name: str) -> list:
+        """Column lists of the table's indexes, primary key first."""
+        insp = inspect(self.engine)
+        out = []
+        pk = (insp.get_pk_constraint(table_name) or {}).get("constrained_columns") or []
+        if pk:
+            out.append(list(pk))
+        out += [[c for c in ix["column_names"] if c] for ix in insp.get_indexes(table_name)]
+        return [cols for cols in out if cols]
+
     def _sample(self, tbl: Table) -> None:
         """Collect a few distinct values of text columns, so the model sees real spellings.
 

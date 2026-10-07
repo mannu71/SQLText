@@ -25,11 +25,14 @@ class ChatBackend(Backend):
 def get_backend(name: str, model: str = None, **options) -> Backend:
     if name == "llama":
         from .llama import LlamaBackend
-        return LlamaBackend(model or "auto", **options)
+        return LlamaBackend(model or "tiny", **options)
     if name == "ollama":
         from .ollama import OllamaBackend
         return OllamaBackend(model or "qwen2.5-coder:1.5b", **options)
+    if name == "bedrock":
+        from .bedrock import FAST_MODEL, BedrockBackend
+        return BedrockBackend(model or FAST_MODEL, **options)
     if name == "needle":
         from .needle import NeedleBackend
         return NeedleBackend(weights=model or None)
-    raise ValueError(f"unknown backend {name!r} (choose llama, ollama or needle)")
+    raise ValueError(f"unknown backend {name!r} (choose router, llama, needle, bedrock or ollama)")

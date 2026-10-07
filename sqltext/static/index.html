@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sqltext</title>
 <style>
-  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6e6e73; --card:#fff; --line:#dedee3; --accent:#2f6fde; --err:#c0392b; }
+  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6e6e73; --card:#fff; --line:#dedee3; --accent:#2f6fde; --err:#c0392b; --warn:#b26a00; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#16171a; --fg:#e8e8ea; --muted:#9a9aa2; --card:#1f2024; --line:#33343a; --accent:#6b9cff; --err:#ff6b5e; }
+    :root { --bg:#16171a; --fg:#e8e8ea; --muted:#9a9aa2; --card:#1f2024; --line:#33343a; --accent:#6b9cff; --err:#ff6b5e; --warn:#f0a640; }
   }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
@@ -20,6 +20,11 @@
   textarea { font-family: ui-monospace, monospace; font-size:13px; min-height:80px; }
   button { padding:8px 14px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
   button:disabled { opacity:.5; cursor:wait; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  #trace { margin:8px 0 0; padding-left:20px; }
+  .sev-high { color:var(--err); font-weight:600; } .sev-medium { color:var(--warn); font-weight:600; }
+  .sev-low { color:var(--muted); font-weight:600; }
+  pre { white-space:pre-wrap; font-size:13px; margin:4px 0; }
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
   .muted { color:var(--muted); font-size:13px; }
   #status { overflow-wrap:anywhere; }
@@ -60,9 +65,15 @@
     <div class="card" style="margin-top:12px">
       <label class="muted" for="sql">Generated SQL (editable)</label>
       <textarea id="sql" spellcheck="false"></textarea>
-      <div class="row"><button id="run">Run SQL</button></div>
+      <div class="row">
+        <button id="run">Run SQL</button>
+        <button id="analyze" class="secondary">Analyze performance</button>
+        <label class="muted"><input type="checkbox" id="rewrite"> suggest a faster rewrite</label>
+      </div>
       <div class="err" id="err"></div>
+      <ol class="muted" id="trace"></ol>
     </div>
+    <div class="card" style="margin-top:12px" id="analysis" hidden></div>
     <div class="card scroll" style="margin-top:12px" id="result"><span class="muted">Results appear here.</span></div>
   </section>
 </main>
@@ -81,7 +92,9 @@ function showStatus(s) {
 }
 function showResult(a) {
   if (a.sql !== undefined) $("sql").value = a.sql || "";
-  $("err").textContent = a.error || "";
+  $("err").textContent = [a.error, ...(a.warnings || []).map(w => "Warning: " + w)].filter(Boolean).join("\n");
+  $("trace").innerHTML = (a.trace || []).map(t => `<li>${esc(t)}</li>`).join("");
+  $("analysis").hidden = true;
   if (!a.columns || !a.columns.length) { $("result").innerHTML = `<span class="muted">${a.error ? "No results." : "Query returned no rows."}</span>`; return; }
   const head = a.columns.map(c => `<th>${esc(c)}</th>`).join("");
   const body = a.rows.map(r => "<tr>" + r.map(v => `<td>${v === null ? '<span class="muted">NULL</span>' : esc(v)}</td>`).join("") + "</tr>").join("");
@@ -101,6 +114,21 @@ $("ask").onclick = () => busy($("ask"), "Thinking… (first question loads the m
   showResult(await api("/api/ask", { question: q, execute: !$("sqlOnly").checked }));
 });
 $("run").onclick = () => busy($("run"), "Running…", async () => showResult(await api("/api/run", { sql: $("sql").value })));
+function showAnalysis(a) {
+  const el = $("analysis"); el.hidden = false;
+  if (a.error) { el.innerHTML = `<div class="err">${esc(a.error)}</div>`; return; }
+  let h = "<strong>Analysis</strong>";
+  h += a.findings.length ? "<ul>" + a.findings.map(f =>
+    `<li><span class="sev-${f.severity}">${f.severity}</span> ${esc(f.message)}<br><span class="muted">${esc(f.fix)}</span></li>`).join("") + "</ul>"
+    : '<p class="muted">No problems found.</p>';
+  if (a.plan.length) h += `<div class="muted">Plan${a.cost !== null ? " (cost " + a.cost + ")" : ""}</div><pre>${esc(a.plan.join("\n"))}</pre>`;
+  if (a.index_suggestions.length) h += `<div class="muted">Suggested indexes (not created)</div><pre>${esc(a.index_suggestions.join("\n"))}</pre>`;
+  if (a.rewrite) h += `<div class="muted">Faster rewrite by ${esc(a.rewrite.model)}: same rows verified, cost ${a.rewrite.cost_before} → ${a.rewrite.cost_after}</div><pre>${esc(a.rewrite.sql)}</pre>`;
+  if (a.notes.length) h += `<ul class="muted">${a.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>`;
+  el.innerHTML = h;
+}
+$("analyze").onclick = () => busy($("analyze"), "Analyzing…", async () =>
+  showAnalysis(await api("/api/analyze", { sql: $("sql").value, rewrite: $("rewrite").checked })));
 $("question").addEventListener("keydown", e => { if (e.key === "Enter") $("ask").click(); });
 api("/api/status").then(showStatus);
 </script>

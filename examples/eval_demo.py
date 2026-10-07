@@ -2,8 +2,10 @@
 
     python examples/make_demo_db.py demo.db
     python examples/eval_demo.py --backend needle
-    python examples/eval_demo.py --backend llama --model small
-    python examples/eval_demo.py --backend llama --model small --db postgresql+psycopg://user@host/shop
+    python examples/eval_demo.py --backend llama --model tiny
+    python examples/eval_demo.py --backend router                 # local models only
+    python examples/eval_demo.py --backend router --bedrock       # with Bedrock escalation
+    python examples/eval_demo.py --backend needle --db postgresql+psycopg://user@host/shop
 
 A question passes when its result matches the reference query's result (column order and
 extra/missing display columns are ignored, numbers compared to 2 decimals).
@@ -15,6 +17,7 @@ import time
 import psutil
 
 from sqltext import Database, TextToSQL, get_backend
+from sqltext.gateway import Router
 
 CASES = [  # (question, reference SQL, single-table?)
     ("How many customers are there?", "SELECT COUNT(*) FROM customers", True),
@@ -64,14 +67,18 @@ def same_result(gold, got) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", default="llama")
+    ap.add_argument("--backend", default="router")
+    ap.add_argument("--bedrock", action="store_true")
     ap.add_argument("--model")
     ap.add_argument("--db", default="sqlite:///demo.db")
     args = ap.parse_args()
 
     db = Database(args.db)
     start = time.time()
-    engine = TextToSQL(db, get_backend(args.backend, args.model))
+    if args.backend == "router":
+        engine = Router(db, bedrock=args.bedrock)
+    else:
+        engine = TextToSQL(db, get_backend(args.backend, args.model))
     load = time.time() - start
     passed = {True: 0, False: 0}
     total = {True: 0, False: 0}
@@ -88,6 +95,8 @@ def main():
         passed[simple] += ok
         status = "PASS" if ok else ("ERROR" if ans.error else "WRONG")
         print(f"{status:5} {latencies[-1]:5.1f}s  {question}\n      {ans.sql or ans.error}")
+        for step in ans.trace:
+            print(f"      . {step}")
     rss_mb = psutil.Process().memory_info().rss / 1024**2
     print(
         f"\n{args.backend} {args.model or ''}: single-table {passed[True]}/{total[True]}, "
